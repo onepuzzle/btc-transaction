@@ -32,7 +32,7 @@ Supports both **Mainnet** and **Testnet**, and can pull dynamic fees from mempoo
 ## Usage
 
 ```bash
-python send_tx.py <TARGET_ADDRESS> <PRIVATE_KEY> [options]
+python send.py <TARGET_ADDRESS> <PRIVATE_KEY> [options]
 ```
 
 ### Command-Line Options
@@ -50,13 +50,13 @@ python send_tx.py <TARGET_ADDRESS> <PRIVATE_KEY> [options]
 * **Send All Minus Fee** (using mempool.space fee):
 
   ```bash
-  python send_tx.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC --fee-rate 60
+  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC --fee-rate 60
   ```
 
 * **Send Specific Amount + USD Fee**:
 
   ```bash
-  python send_tx.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
+  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
     --send-sats 50000 \
     --fee-usd 0.50
   ```
@@ -64,7 +64,7 @@ python send_tx.py <TARGET_ADDRESS> <PRIVATE_KEY> [options]
 * **Auto-Fetch Slipstream Fee**:
 
   ```bash
-  python send_tx.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
+  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
     --fee-source slipstream
   ```
 
@@ -77,7 +77,7 @@ Fees on Slipstream can change rapidly. Follow these steps to ensure your transac
 1. **Generate Raw Transaction**
 
    ```bash
-   python send_tx.py <TARGET_ADDRESS> <PRIVATE_KEY> --fee-source slipstream
+   python send.py <TARGET_ADDRESS> <PRIVATE_KEY> --fee-source slipstream
    ```
 
 2. **Submit to Slipstream Web UI**
