@@ -1,230 +1,224 @@
+#!/usr/bin/env python3
+import sys
+import json
+import argparse
 import requests
-from bitcoinlib.keys import Key
+
+from bitcoinlib.keys import Key, Address
 from bitcoinlib.transactions import Transaction, Input, Output
 from bitcoinlib.services.services import Service
 
-def get_btc_price_usd():
-    """
-    Fetch current BTC price in USD from CoinGecko API.
-    Returns:
-        float: BTC price in USD.
-    """
-    try:
-        resp = requests.get(
-            'https://api.coingecko.com/api/v3/simple/price',
-            params={'ids': 'bitcoin', 'vs_currencies': 'usd'}
-        )
+# ─── Configuration / Constants ────────────────────────────────────────────────
+
+COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
+MEMPOOL_FEES_URL = "https://mempool.space/api/v1/fees/recommended"
+SLIPSTREAM_URL = "https://slipstream.mara.com/rest-api/getinfo"
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def get_btc_price_usd() -> float:
+    """Fetch current BTC price in USD from CoinGecko."""
+    resp = requests.get(COINGECKO_URL, params={"ids": "bitcoin", "vs_currencies": "usd"}, timeout=10)
+    resp.raise_for_status()
+    return float(resp.json()["bitcoin"]["usd"])
+
+def get_recommended_fee_rate(source: str = "mempool") -> float:
+    """Fetch recommended fee rate (sats/vByte) from chosen API."""
+    if source == "slipstream":
+        resp = requests.get(SLIPSTREAM_URL, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-        return float(data['bitcoin']['usd'])
-    except Exception as e:
-        raise RuntimeError(f"Error fetching BTC price: {e}")
+        return float(resp.json().get("fee_rate"))
+    resp = requests.get(MEMPOOL_FEES_URL, timeout=10)
+    resp.raise_for_status()
+    return float(resp.json().get("fastestFee"))
 
-def get_recommended_fee_rate(source: str = 'mempool'):
+def estimate_tx_size(n_inputs: int, n_outputs: int) -> int:
+    """Estimate P2PKH tx size: 148 vB per input + 34 vB per output + 10 vB overhead."""
+    return 148 * n_inputs + 34 * n_outputs + 10
+
+def fetch_utxos(address: str, network: str) -> list[dict]:
+    """Retrieve UTXOs for a given address via bitcoinlib Service."""
+    svc = Service(network=network)
+    utxos = svc.getutxos(address)
+    if not utxos:
+        sys.exit(f"Error: No UTXOs found for {address}")
+    return utxos
+
+def build_transaction(
+    source_address: str,
+    utxos: list[dict],
+    target_address: str,
+    send_sats: int,
+    fee_sats: int
+) -> tuple[list[Input], list[Output], list[dict], int]:
     """
-    Fetch recommended fee rate in sat/vByte.
-    Args:
-        source (str): 'mempool' or 'slipstream'
-    Returns:
-        float: recommended sats per vByte
+    Select minimal UTXOs to cover send + fee.
+    Returns: inputs, outputs, used_utxos (original dicts), accumulator (sum of used utxos).
     """
+    used_utxos = []
+    inputs: list[Input] = []
+    acc = 0
+
+    for u in utxos:
+        used_utxos.append({'txid': u['txid'], 'output_n': u['output_n'], 'value': u['value']})
+        inputs.append(Input(
+            u['txid'], u['output_n'],
+            address=source_address,
+            value=u['value'],
+            sequence=0xFFFFFFFF
+        ))
+        acc += u['value']
+        if acc >= send_sats + fee_sats:
+            break
+
+    outputs = [Output(send_sats, target_address)]
+    change = acc - send_sats - fee_sats
+    if change > 0:
+        outputs.append(Output(change, source_address))
+
+    return inputs, outputs, used_utxos, acc
+
+def determine_witness_type(address: str) -> str:
+    """
+    Derive witness_type from an address via bitcoinlib:
+      - 'legacy' for 1...
+      - 'p2sh-segwit' for wrapped segwit
+      - 'segwit' for native v0
+      - 'p2tr' for taproot
+    """
+    addr_obj = Address.parse(address)
+    return addr_obj.witness_type
+
+def print_details(details: dict):
+    """Nicely print the details dict you asked for."""
+    print("=== Transaction Details ===")
+    print(f"Source Address        : {details['source_address']}")
+    print(f"Explorer Link (Source): {details['explorer_urls']['source']}")
+    print(f"Target Address        : {details['target_address']}")
+    print(f"Explorer Link (Target): {details['explorer_urls']['target']}")
+    print(f"Total Balance         : {details['total_balance_sats']/1e8:.8f} BTC")
+    print(f"Send Amount           : {details['send_sats']} sats ({details['send_sats']/1e8:.8f} BTC)")
+    if details['change_sats'] > 0:
+        print(f"Change Amount         : {details['change_sats']} sats ({details['change_sats']/1e8:.8f} BTC)")
+    print(f"Estimated Size        : {details['estimated_size_vbytes']} vBytes")
+    print(f"Fee Rate              : {details['fee_rate']} sats/vByte")
+    print(f"Fee                   : {details['fee_sats']} sats (~${details['fee_usd']:.2f})")
+    print("\nRaw Transaction Hex:")
+    print(details['tx_hex'])
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    p = argparse.ArgumentParser(description="Prepare or sign a Bitcoin transaction")
+    p.add_argument("target_address", help="Recipient address")
+    p.add_argument("key_or_address",
+                   help="Private key (WIF/hex) to sign now, or wallet address to prepare unsigned TX")
+    p.add_argument("--send-sats", type=int, default=None,
+                   help="Amount to send (satoshis); default = all funds minus fee")
+    p.add_argument("--fee-usd", type=float, default=None,
+                   help="Flat fee in USD (overrides rate)")
+    p.add_argument("--fee-rate", type=float, default=None,
+                   help="Fee rate in sats/vByte (overrides API)")
+    p.add_argument("--fee-source", choices=["mempool", "slipstream"], default="mempool",
+                   help="API for fee rate if --fee-rate not set")
+    p.add_argument("--network", choices=["bitcoin", "testnet"], default="bitcoin",
+                   help="Network to use")
+    args = p.parse_args()
+
+    # 1. Determine source: private key → sign now; else just address → prepare only
     try:
-        if source == 'slipstream':
-            url = 'https://slipstream.mara.com/rest-api/getinfo'
-            resp = requests.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            return float(data.get('fee_rate'))
-        else:
-            url = 'https://mempool.space/api/v1/fees/recommended'
-            resp = requests.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            return float(data.get('fastestFee'))
-    except Exception as e:
-        raise RuntimeError(f"Error fetching fee rate from {source}: {e}")
-
-def estimate_tx_size(num_inputs: int, num_outputs: int):
-    """
-    Roughly estimate P2PKH transaction size.
-    Args:
-        num_inputs (int): number of inputs
-        num_outputs (int): number of outputs
-    Returns:
-        int: estimated size in vBytes
-    """
-    # 148 vBytes per input, 34 vBytes per output, plus 10 vBytes overhead
-    return 148 * num_inputs + 34 * num_outputs + 10
-
-def create_signed_transaction(
-        target_address: str,
-        private_key_hex: str,
-        send_amount_sats: int = None,
-        fee_usd: float = None,
-        fee_rate: float = None,
-        fee_source: str = 'mempool',
-        network: str = 'bitcoin'
-):
-    """
-    Create and sign a Bitcoin transaction sending either:
-      - a specified amount (send_amount_sats) plus change back to sender, or
-      - the entire balance minus fee if send_amount_sats is None.
-
-    Fee can be specified in USD or sats/vByte, or fetched from a fee API.
-
-    Args:
-        target_address (str): recipient Bitcoin address.
-        private_key_hex (str): sender's private key (WIF or hex).
-        send_amount_sats (int, optional): amount to send in satoshis.
-        fee_usd (float, optional): fee amount in USD.
-        fee_rate (float, optional): fee rate in sats per vByte.
-        fee_source (str): 'mempool' or 'slipstream' if fee_rate not provided.
-        network (str): 'testnet' or 'bitcoin' (mainnet).
-
-    Returns:
-        dict: {
-            'success': bool,
-            'raw_tx': str or None,
-            'details': dict or error message
-        }
-    """
-    try:
-        # 1. Import key and derive source address
-        key = Key(private_key_hex, network=network)
+        key = Key(args.key_or_address, network=args.network)
         source_address = key.address()
+        is_key = True
+    except Exception:
+        source_address = args.key_or_address
+        is_key = False
 
-        # 2. Fetch UTXOs
-        service = Service(network=network)
-        utxos = service.getutxos(source_address)
-        if not utxos:
-            return {'success': False, 'raw_tx': None, 'details': "No UTXOs found"}
+    # 2. Fetch UTXOs and compute total balance
+    utxos = fetch_utxos(source_address, args.network)
+    total_sats = sum(u["value"] for u in utxos)
 
-        # 3. Sum balance and count inputs
-        total_sats = sum(u['value'] for u in utxos)
-        num_inputs = len(utxos)
+    # 3. Fee calculation
+    fee_rate = args.fee_rate or (get_recommended_fee_rate(args.fee_source) if args.fee_usd is None else None)
+    est_size = estimate_tx_size(len(utxos), 2 if args.send_sats else 1)
 
-        # 4. Determine fee rate if needed
-        if fee_rate is None and fee_usd is None:
-            fee_rate = get_recommended_fee_rate(fee_source)
-
-        # 5. Estimate number of outputs
-        #    if sending full balance: 1 output; otherwise 2 (recipient + change)
-        num_outputs = 1 if send_amount_sats is None else 2
-
-        # 6. Estimate tx size and compute fee_sats
-        est_size = estimate_tx_size(num_inputs, num_outputs)
-        if fee_usd is not None:
-            price_usd = get_btc_price_usd()
-            fee_sats = int((fee_usd / price_usd) * 1e8)
-        else:
-            fee_sats = int(fee_rate * est_size)
-
-        # 7. Determine send_sats
-        if send_amount_sats is None:
-            send_sats = total_sats - fee_sats
-        else:
-            send_sats = send_amount_sats
-            if total_sats < send_sats + fee_sats:
-                bal_btc = total_sats / 1e8
-                needed = (send_sats + fee_sats) / 1e8
-                return {
-                    'success': False, 'raw_tx': None,
-                    'details': f"Insufficient funds: balance {bal_btc:.8f} BTC, need {needed:.8f} BTC"
-                }
-
-        # 8. Build inputs
-        inputs = []
-        acc = 0
-        for u in utxos:
-            inputs.append(
-                Input(
-                    u['txid'],
-                    u['output_n'],
-                    address=source_address,
-                    sequence=0xFFFFFFFF
-                )
-            )
-            acc += u['value']
-            if acc >= (send_sats + fee_sats):
-                break
-
-        # 9. Build outputs: recipient + optional change
-        outputs = [Output(send_sats, target_address)]
-        change_sats = total_sats - send_sats - fee_sats
-        if change_sats > 0:
-            outputs.append(Output(change_sats, source_address))
-
-        # 10. Create, sign, serialize
-        tx = Transaction(inputs, outputs, network=network)
-        tx.sign(key)
-        raw_hex = tx.raw_hex()
-
-        # 11. Prepare details
-        details = {
-            'source_address': source_address,
-            'target_address': target_address,
-            'total_balance_sats': total_sats,
-            'send_sats': send_sats,
-            'change_sats': change_sats,
-            'fee_sats': fee_sats,
-            'fee_rate': fee_rate,
-            'fee_usd': (fee_sats / 1e8 * get_btc_price_usd()) if fee_usd is None else fee_usd,
-            'estimated_size_vbytes': est_size,
-            'tx_hex': raw_hex,
-            'explorer_urls': {
-                'source': f'https://www.blockchain.com/btc/address/{source_address}',
-                'target': f'https://www.blockchain.com/btc/address/{target_address}'
-            }
-        }
-        return {'success': True, 'raw_tx': raw_hex, 'details': details}
-
-    except Exception as e:
-        return {'success': False, 'raw_tx': None, 'details': f"Error creating transaction: {e}"}
-
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description='Create & sign a Bitcoin transaction with optional send amount and flexible fees.'
-    )
-    parser.add_argument('target', help='Recipient address')
-    parser.add_argument('private_key', help='Your private key (WIF or hex)')
-    parser.add_argument('--send-sats', type=int, default=None,
-                        help='Amount to send in satoshis (defaults to all funds minus fee)')
-    parser.add_argument('--fee-usd', type=float, default=None,
-                        help='Fee amount in USD (overrides rate)')
-    parser.add_argument('--fee-rate', type=float, default=None,
-                        help='Fee rate in sats/vByte')
-    parser.add_argument('--fee-source', choices=['mempool', 'slipstream'], default='mempool',
-                        help='API to fetch fee rate if not provided')
-    parser.add_argument('--network', choices=['testnet', 'bitcoin'], default='bitcoin',
-                        help='Network to use (default: mainnet)')
-    args = parser.parse_args()
-
-    result = create_signed_transaction(
-        target_address=args.target,
-        private_key_hex=args.private_key,
-        send_amount_sats=args.send_sats,
-        fee_usd=args.fee_usd,
-        fee_rate=args.fee_rate,
-        fee_source=args.fee_source,
-        network=args.network
-    )
-
-    if not result['success']:
-        print(f"Error: {result['details']}")
+    if args.fee_usd is not None:
+        btc_price = get_btc_price_usd()
+        fee_sats = int((args.fee_usd / btc_price) * 1e8)
+        fee_usd = args.fee_usd
     else:
-        d = result['details']
-        print("=== Transaction Preview ===")
-        print(f"Source Address        : {d['source_address']}")
-        print(f"Explorer Link (Source): {d['explorer_urls']['source']}")
-        print(f"Target Address        : {d['target_address']}")
-        print(f"Explorer Link (Target): {d['explorer_urls']['target']}")
-        print(f"Total Balance         : {d['total_balance_sats']/1e8:.8f} BTC")
-        print(f"Send Amount           : {d['send_sats']} sats ({d['send_sats']/1e8:.8f} BTC)")
-        if d['change_sats'] > 0:
-            print(f"Change Amount         : {d['change_sats']} sats ({d['change_sats']/1e8:.8f} BTC)")
-        print(f"Estimated Size        : {d['estimated_size_vbytes']} vBytes")
-        print(f"Fee                   : {d['fee_sats']} sats (~${d['fee_usd']:.2f})")
-        print("\nRaw Transaction Hex:")
-        print(d['tx_hex'])
+        fee_sats = int(fee_rate * est_size)
+        fee_usd = (fee_sats / 1e8) * get_btc_price_usd()
+
+    # 4. Determine send amount
+    if args.send_sats is None:
+        send_sats = total_sats - fee_sats
+    else:
+        send_sats = args.send_sats
+        if send_sats + fee_sats > total_sats:
+            sys.exit(f"Error: Insufficient funds. Balance={total_sats} sats, need={send_sats+fee_sats}")
+
+    # 5. Build inputs, outputs
+    inputs, outputs, used_utxos, acc = build_transaction(
+        source_address, utxos, args.target_address, send_sats, fee_sats
+    )
+    change_sats = acc - send_sats - fee_sats
+    actual_size = estimate_tx_size(len(inputs), len(outputs))
+
+    # 6. Assemble details dict (without tx_hex yet)
+    details = {
+        'source_address': source_address,
+        'target_address': args.target_address,
+        'total_balance_sats': total_sats,
+        'send_sats': send_sats,
+        'change_sats': change_sats,
+        'fee_sats': fee_sats,
+        'fee_rate': fee_rate,
+        'fee_usd': fee_usd,
+        'estimated_size_vbytes': actual_size,
+        'explorer_urls': {
+            'source': f'https://www.blockchain.com/btc/address/{source_address}',
+            'target': f'https://www.blockchain.com/btc/address/{args.target_address}'
+        }
+    }
+
+    # 7a. If user passed a private key → sign immediately
+    if is_key:
+        witness_type = determine_witness_type(source_address)
+        tx = Transaction(inputs, outputs,
+                         network=args.network,
+                         witness_type=witness_type)
+        tx.sign(key)
+        details['tx_hex'] = tx.raw_hex()
+        print_details(details)
+        return
+
+    # 7b. Otherwise write unsigned files + interactive prompt
+    tx = Transaction(inputs, outputs, network=args.network)
+    unsigned_hex = tx.raw_hex()
+    details['tx_hex'] = unsigned_hex
+
+    # Save for offline signing
+    with open("unsigned_tx.hex", "w") as f_hex, open("unsigned_data.json", "w") as f_json:
+        f_hex.write(unsigned_hex)
+        json.dump({**details, 'network': args.network, 'utxos': used_utxos}, f_json, indent=2)
+
+    print("Unsigned transaction written to unsigned_tx.hex")
+    print("UTXO & detail file written to unsigned_data.json")
+
+    choice = input("Would you like to sign it now? [Y/n] ").strip().lower()
+    if choice in ("y", "yes", ""):
+        priv = input("Enter your private key (WIF or hex): ").strip()
+        key2 = Key(priv, network=args.network)
+        witness_type = determine_witness_type(source_address)
+        tx2 = Transaction(inputs, outputs,
+                          network=args.network,
+                          witness_type=witness_type)
+        tx2.sign(key2)
+        details['tx_hex'] = tx2.raw_hex()
+        print_details(details)
+    else:
+        print("You can sign later with sign.py and view details then.")
+
+if __name__ == "__main__":
+    main()

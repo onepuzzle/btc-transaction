@@ -1,96 +1,138 @@
 # Bitcoin Send-All / Custom-Amount Transaction Tool
 
-A Python script to build and sign Bitcoin transactions with flexible fee options and optional change outputs.
+A pair of Python scripts to build, sign and optionally broadcast Bitcoin transactions with flexible fee options and optional change outputs.  
 Supports both **Mainnet** and **Testnet**, and can pull dynamic fees from mempool.space or Slipstream by Mara.
+
+---
+
+## Components
+
+- **`send.py`**  
+  - Build & sign (or prepare) a transaction in one step  
+  - If you pass a private key, it signs immediately  
+  - If you pass only an address, it writes:
+    - `unsigned_tx.hex` — raw unsigned TX hex  
+    - `unsigned_data.json` — metadata + UTXO values for offline signing  
+  - Interactive prompt lets you sign immediately or later
+
+- **`sign.py`**  
+  - Take `unsigned_data.json` + your private key → rebuild inputs (with values) → sign → print signed TX hex  
 
 ---
 
 ## Features
 
-* **Send-All**: Send your entire wallet balance (minus fee) in a single output
-* **Custom Amount**: Send a specified amount (in satoshis) and receive the remainder back as change
-* **Flexible Fees**:
-
-  * Specify fee in **USD** (`--fee-usd`)
-  * Specify fee rate in **sats/vByte** (`--fee-rate`)
-  * **Auto-fetch** recommended fees from **mempool.space** or **Slipstream** (`--fee-source`)
-* **Network Selection**: Choose between **Mainnet** (`bitcoin`) and **Testnet** (`testnet`)
+- **Send-All**: send your entire balance (minus fee) in one output  
+- **Custom Amount**: send a specified satoshi amount and return change to yourself  
+- **Flexible Fees**:
+  - **USD fee** (`--fee-usd`)  
+  - **Rate** in sats/vByte (`--fee-rate`)  
+  - **Auto-fetch** from **mempool.space** or **Slipstream** (`--fee-source`)  
+- **Automatic Tx Type**: legacy vs P2SH-SegWit vs native SegWit vs Taproot is inferred from your source address  
+- **Mainnet / Testnet** support (`--network`)
 
 ---
 
 ## Installation
 
-1. Ensure you have **Python 3.7+**
+1. Python 3.7+  
 2. Install dependencies:
 
    ```bash
    pip install bitcoinlib requests
-   ```
 
 ---
 
 ## Usage
 
+### 1. `send.py`
+
 ```bash
-python send.py <TARGET_ADDRESS> <PRIVATE_KEY> [options]
+python send.py <TARGET_ADDRESS> <KEY_OR_ADDRESS> [options]
 ```
 
-### Command-Line Options
+* `<KEY_OR_ADDRESS>`
 
-| Option                               | Description                                                                     |
-| ------------------------------------ | ------------------------------------------------------------------------------- |
-| `--send-sats <N>`                    | Amount to send in satoshis. If omitted, sends all funds minus fee.              |
-| `--fee-usd <X>`                      | Fee amount in USD (overrides `--fee-rate`).                                     |
-| `--fee-rate <Y>`                     | Fee rate in sats per vByte (overrides `--fee-source`).                          |
-| `--fee-source {mempool, slipstream}` | API to auto-fetch fee rate if `--fee-rate` not provided. Defaults to `mempool`. |
-| `--network {testnet, bitcoin}`       | Network to use (`bitcoin`=Mainnet, `testnet`=Testnet). Defaults to Mainnet.     |
+  * **WIF/hex** private key → build & sign immediately
+  * **Wallet address**      → build unsigned and save files for later signing
 
-### Examples
+#### Options
 
-* **Send All Minus Fee** (using mempool.space fee):
+| Flag                                 | Description                                                   |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `--send-sats <N>`                    | Amount (satoshis) to send. Omit to send *all* minus fee       |
+| `--fee-usd <X>`                      | Flat fee in USD (overrides `--fee-rate`)                      |
+| `--fee-rate <Y>`                     | Fee rate in sats/vByte (overrides `--fee-source`)             |
+| `--fee-source {mempool, slipstream}` | Auto-fetch fee rate if no `--fee-rate`; defaults to `mempool` |
+| `--network {bitcoin, testnet}`       | Default = `bitcoin` (Mainnet)                                 |
+
+#### Examples
+
+* **Send all minus fee** (auto-fee):
 
   ```bash
-  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC --fee-rate 60
+  python send.py bc1… L1a… --fee-source mempool
   ```
 
-* **Send Specific Amount + USD Fee**:
+* **Custom amount + USD fee**:
 
   ```bash
-  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
+  python send.py 3FZ… L1a… \
     --send-sats 50000 \
     --fee-usd 0.50
   ```
 
-* **Auto-Fetch Slipstream Fee**:
+* **Prepare only (offline signing)**:
 
   ```bash
-  python send.py 3FZbgi29cpjq2GjdwV8eyHuJJnkLtktZc5 L1aW4aubDFB7yfras2S1mME7zGZSMC \
-    --fee-source slipstream
+  python send.py bc1… 1A2…  # no private key passed
   ```
+
+  This creates:
+
+  * `unsigned_tx.hex`
+  * `unsigned_data.json`
 
 ---
 
-## Slipstream Workflow
+### 2. `sign.py`
 
-Fees on Slipstream can change rapidly. Follow these steps to ensure your transaction is prioritized:
+```bash
+python sign.py --data-file unsigned_data.json --private-key <YOUR_WIF>
+```
 
-1. **Generate Raw Transaction**
+* Reads `unsigned_data.json` (from `send.py`)
+* Rebuilds all inputs with correct values & script type
+* Signs and outputs **signed** TX hex
+
+---
+
+## Offline / Slipstream Workflow
+
+1. **Prepare unsigned TX**
 
    ```bash
-   python send.py <TARGET_ADDRESS> <PRIVATE_KEY> --fee-source slipstream
+   python send.py <TARGET_ADDRESS> <YOUR_ADDRESS> --fee-source slipstream
    ```
+2. **(Optional) Review raw TX**
 
-2. **Submit to Slipstream Web UI**
+   * Open `unsigned_tx.hex` in a block explorer
+3. **Sign**
 
-   * Visit: [https://slipstream.mara.com/](https://slipstream.mara.com/)
-   * Paste your raw transaction and review the current fee recommendation.
+   ```bash
+   python sign.py --data-file unsigned_data.json --private-key <YOUR_WIF>
+   ```
+4. **Broadcast**
 
-3. **Adjust if Necessary**
+   * Paste final hex into your preferred API/UI
 
-   * If Slipstream’s required fee has jumped (e.g. above \$100), either:
+---
 
-     * **Re-run** the script to regenerate a fresh raw transaction with the updated rate
-     * **Manually** specify `--fee-usd` to set at least \~\$100 so Slipstream prioritizes your TX
+## Notes
+
+* Change outputs are sent back to your own address.
+* The library infers the correct **witness\_type** (`legacy`, `p2sh-segwit`, `segwit`, `p2tr`) from your source address.
+* Always double-check your raw hex on a block explorer before broadcasting.
 
 ---
 
@@ -98,19 +140,10 @@ Fees on Slipstream can change rapidly. Follow these steps to ensure your transac
 
 If you find this tool helpful, your support is greatly appreciated! 💖
 
-* **Bitcoin**: [bc1qh33frsqg06pafhcaj8kzljau04shwwp3ujwl6h](https://www.blockchain.com/btc/address/bc1qh33frsqg06pafhcaj8kzljau04shwwp3ujwl6h)
-
----
-
-## Notes
-
-* When you use `--send-sats`, any leftover (change) is sent back to your own address as a second output.
-* Omit `--send-sats` to send **all** available funds (minus fee) in a single output.
-* Always verify your raw transaction in a block explorer or on Slipstream’s UI before broadcasting.
+**Bitcoin**: [1KrUmbGxbzHo8Xe12TUk4NLxzU2h8CiP2J](https://www.blockchain.com/btc/address/1KrUmbGxbzHo8Xe12TUk4NLxzU2h8CiP2J)
 
 ---
 
 ## License
 
 This project is licensed under the MIT License.
-
