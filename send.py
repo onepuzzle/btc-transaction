@@ -216,9 +216,10 @@ def main():
                           witness_type=witness_type)
         tx2.sign(key2)
         details['tx_hex'] = tx2.raw_hex()
-        print_details(details)
     else:
         print("You can sign later with sign.py and view details then.")
+
+    print_details(details)
 
 if __name__ == "__main__":
     main()
